@@ -1,25 +1,78 @@
 # System Monitor Overlay
 
-Compact always-on-top system monitoring widget for **Windows 11**.
+[![Windows](https://img.shields.io/badge/Windows-10%20%2F%2011-0078D4?logo=windows&logoColor=white)](https://github.com/sellinghub-database/MonitoringSystem/releases/latest)
+[![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](#license)
+[![Release](https://img.shields.io/github/v/release/sellinghub-database/MonitoringSystem)](https://github.com/sellinghub-database/MonitoringSystem/releases/latest)
 
-## Features
+Компактный системный монитор для Windows: CPU, RAM, диск, сеть и температуры в одном оверлее. Сворачивается в одну полоску, живёт в трее, не перекрывает другие окна.
 
-- Real-time CPU, GPU, RAM, disk, network metrics
-- Per-core CPU bars and top processes
-- Dark glassmorphism overlay (frameless, no taskbar icon)
-- Critical alerts with pulsing red border
-- System tray: Show/Hide, Settings, Exit
-- Autostart via `HKCU\...\Run`
-- Optional click-through mode
-- One-file EXE build with PyInstaller
+**[Скачать EXE](https://github.com/sellinghub-database/MonitoringSystem/releases/latest)** · **[Все релизы](https://github.com/sellinghub-database/MonitoringSystem/releases)**
 
-## Requirements
+---
 
-- Windows 10/11
-- Python 3.10+
-- Git (only for `push_to_github.py`)
+## Скриншоты
 
-## Setup
+<table>
+  <tr>
+    <td align="center"><img src="docs/screenshots/cpu.jpg" alt="CPU — процессы"/><br/><sub>CPU — процессы</sub></td>
+    <td align="center"><img src="docs/screenshots/ram.jpg" alt="RAM — память"/><br/><sub>RAM — память</sub></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="docs/screenshots/disk.jpg" alt="Disk — чтение и запись"/><br/><sub>Disk — чтение / запись</sub></td>
+    <td align="center"><img src="docs/screenshots/metrics.jpg" alt="Показатели и график"/><br/><sub>Показатели и график</sub></td>
+  </tr>
+  <tr>
+    <td colspan="2" align="center"><img src="docs/screenshots/collapsed.jpg" alt="Свёрнутая полоса"/><br/><sub>Свёрнутая полоса: CPU / RAM / Disk / Показатели + копировать / развернуть / закрыть</sub></td>
+  </tr>
+</table>
+
+<p align="center"><img src="docs/screenshots/overlay.jpg" alt="Оверлей поверх рабочего стола" width="720"/><br/><sub>Оверлей поверх редактора — полупрозрачный, без иконки в панели задач</sub></p>
+
+---
+
+## Релизы
+
+| | |
+|---|---|
+| **Текущий** | [**v1.2.0**](https://github.com/sellinghub-database/MonitoringSystem/releases/tag/v1.2.0) |
+| **Файл** | [`SystemMonitorOverlay.exe`](https://github.com/sellinghub-database/MonitoringSystem/releases/latest/download/SystemMonitorOverlay.exe) — один файл, без консоли |
+| **В этом релизе** | Рабочая папка `%LOCALAPPDATA%\SystemMonitoring`, логи в `app.log`, без окна консоли |
+| **Архив** | [Все версии](https://github.com/sellinghub-database/MonitoringSystem/releases) |
+
+Windows может показать SmartScreen при первом запуске неподписанного EXE — «Подробнее» → «Выполнить в любом случае».
+
+---
+
+## Возможности
+
+- Вкладки **CPU / RAM / Disk / Показатели** с процентами и мягкой цветовой шкалой нагрузки
+- Список процессов с иконками, PID, типом FG/BG; мягкое завершение процесса
+- Сворачивание в одну строку; клик по вкладке разворачивает нужную панель
+- Прилипание к краям экрана, позиция сохраняется через 30 с покоя
+- График истории (окно 10 с … 6 ч)
+- Трей: Show / Hide, Настройки, Выход. Show на короткое время поднимает окно поверх остальных
+- Автозапуск через `HKCU\...\Run`
+- Режим click-through (клики проходят сквозь окно)
+
+---
+
+## Данные приложения
+
+После первого запуска файлы создаются здесь:
+
+`%LOCALAPPDATA%\SystemMonitoring\`
+
+| Файл | Назначение |
+|------|------------|
+| `config.json` | Настройки и позиция окна |
+| `stats_history.csv` | История метрик |
+| `icon.ico` | Иконка трея |
+| `app.log` | Журнал (если логирование включено) |
+
+---
+
+## Запуск из исходников
 
 ```powershell
 cd MonitoringSystem
@@ -29,76 +82,44 @@ pip install -r requirements.txt
 py -3 main.py
 ```
 
-## Usage
+Требования: Windows 10/11, Python 3.10+.
 
-- Overlay appears in the **top-right** corner.
-- Drag the title to move (when click-through is off).
-- Right-click the **tray icon** for Show/Hide, Settings, Exit.
-- Closing the overlay hides it to the tray; use **Exit** to quit.
-
-### Settings
-
-- Opacity
-- Click-through
-- Autostart on logon
-- Custom alert thresholds (CPU/GPU temp, CPU/RAM load, process CPU)
-
-### Alerts
-
-Border and metric labels pulse bright red (`#ff2222`) when:
-
-| Metric | Default threshold |
-|--------|-------------------|
-| CPU temp | > 85°C |
-| GPU temp | > 85°C |
-| CPU load | > 90% |
-| RAM usage | > 90% |
-| Process CPU | > 50% |
-
-Normal value colors: green (`#00ff88`), yellow (`#ffcc00` above moderate), red (`#ff2222` critical).
-
-## Build EXE
+### Сборка EXE
 
 ```powershell
 py -3 build.py
 ```
 
-Output: `dist\SystemMonitorOverlay.exe` (one-file, no console, with `icon.ico`).
+Результат: `dist\SystemMonitorOverlay.exe`.
 
-Copy `config.json` next to the EXE if you want to ship defaults; the app also creates one on first run.
+### Температуры
 
-## Push to GitHub
+CPU / GPU / плата / RAM лучше читаются, если запущен [LibreHardwareMonitor](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor) с WMI. Для NVIDIA GPU есть запасной путь через `nvidia-smi`. Без датчиков в UI будет `N/A`.
 
-Repo: https://github.com/sellinghub-database/MonitoringSystem.git
+---
 
-```powershell
-py -3 push_to_github.py
-```
+## English
 
-Requires Git in PATH (or a standard Git for Windows install).
+Compact Windows overlay for CPU, RAM, disk, network, and temperatures. Collapse to a single strip, live in the tray, snap to screen edges. Config and history live under `%LOCALAPPDATA%\SystemMonitoring`.
 
-## Notes / limitations
+**[Download EXE](https://github.com/sellinghub-database/MonitoringSystem/releases/latest)** · **[All releases](https://github.com/sellinghub-database/MonitoringSystem/releases)**
 
-- **GPU metrics** via `GPUtil` work best with **NVIDIA**. AMD/Intel iGPU often shows `N/A`.
-- **Temperatures** on stock Windows are frequently unavailable without LibreHardwareMonitor (WMI). The app shows `N/A` instead of crashing.
-- Values are smoothed with a rolling average of the last 3 samples to reduce jitter.
-- Config is stored as `config.json` in the app directory (next to the EXE when frozen).
+- Tabs with load-band colors, process lists, optional process terminate
+- Chart history (10s–6h), tray Show/Hide/Settings/Exit
+- No console window; file logging to `app.log`
+- Build: `py -3 build.py` → `dist\SystemMonitorOverlay.exe`
 
-## Project layout
+---
 
-```
-MonitoringSystem/
-├── main.py              # Entry point
-├── monitor.py           # Data collection
-├── ui.py                # Overlay widget
-├── tray.py              # System tray
-├── settings.py          # Settings + config + autostart
-├── config.json          # User preferences
-├── build.py             # PyInstaller build
-├── push_to_github.py    # Git commit & push helper
-├── requirements.txt
-└── README.md
-```
+## Спонсоры / проекты
+
+### [SellingHub](https://sellinghub.ru/) — база B2B-контактов и клиентов для бизнеса
+
+Контакты компаний и организаций для поиска клиентов и развития продаж: ЛПР, сегменты по отраслям и регионам, данные для CRM и первого касания.
+
+**[sellinghub.ru](https://sellinghub.ru/)**
+
+---
 
 ## License
 
