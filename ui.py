@@ -110,7 +110,7 @@ def load_band_colors(pct: float, active: bool = False) -> tuple[str, str]:
     return bg, fg
 
 
-COLLAPSED_HEIGHT = 60
+COLLAPSED_HEIGHT = 46
 SNAP_PX = 12
 POS_IDLE_MS = 30000
 
@@ -163,7 +163,7 @@ class OverlayWindow:
         self.win.title("System Monitor Overlay")
         self.win.configure(bg=BG)
         self.win.overrideredirect(True)
-        self.win.attributes("-topmost", True)
+        self.win.attributes("-topmost", False)
         self.win.attributes("-alpha", float(config.get("opacity", 0.85)))
 
         sw = self.win.winfo_screenwidth()
@@ -227,6 +227,22 @@ class OverlayWindow:
             focuscolor=BORDER,
         )
         style.map(
+            "Monitor.Treeview.Heading",
+            background=[
+                ("active", BORDER),
+                ("pressed", BORDER),
+                ("!active", BORDER),
+            ],
+            foreground=[
+                ("active", MUTED),
+                ("pressed", MUTED),
+            ],
+            relief=[("active", "flat"), ("pressed", "flat")],
+            bordercolor=[("active", BORDER), ("pressed", BORDER)],
+            lightcolor=[("active", BORDER), ("pressed", BORDER)],
+            darkcolor=[("active", BORDER), ("pressed", BORDER)],
+        )
+        style.map(
             "Monitor.Treeview",
             background=[("selected", "#1f6feb")],
             foreground=[("selected", "#ffffff")],
@@ -277,19 +293,32 @@ class OverlayWindow:
 
         inner = tk.Frame(self.border, bg=BG)
         inner.pack(fill=tk.BOTH, expand=True, padx=1, pady=1)
+        self._inner = inner
 
-        # Header
-        header = tk.Frame(inner, bg=BG)
-        header.pack(fill=tk.X, padx=8, pady=(8, 4))
-        title = tk.Label(header, text="SYSTEM MONITOR", bg=BG, fg=FG, font=self._font_title)
+        # Title row — hidden when collapsed (buttons live in strip, never reparented)
+        title_row = tk.Frame(inner, bg=BG)
+        title_row.pack(fill=tk.X, padx=8, pady=(8, 2))
+        self._title_row = title_row
+        title = tk.Label(title_row, text="SYSTEM MONITOR", bg=BG, fg=FG, font=self._font_title)
         title.pack(side=tk.LEFT)
-        for w in (header, title):
+        self._title = title
+        for w in (title_row, title):
             w.bind("<Button-1>", self._start_drag)
             w.bind("<B1-Motion>", self._on_drag)
             w.bind("<ButtonRelease-1>", self._end_drag)
 
-        btn_box = tk.Frame(header, bg=BG)
-        btn_box.pack(side=tk.RIGHT)
+        # Permanent strip: buttons RIGHT first, then tabs LEFT (tk pack order)
+        strip = tk.Frame(inner, bg=BG)
+        strip.pack(fill=tk.X, padx=6, pady=(2, 4))
+        self._strip = strip
+        self._tab_bar = strip
+        strip.bind("<Button-1>", self._start_drag)
+        strip.bind("<B1-Motion>", self._on_drag)
+        strip.bind("<ButtonRelease-1>", self._end_drag)
+
+        btn_box = tk.Frame(strip, bg=BG)
+        btn_box.pack(side=tk.RIGHT, padx=(4, 2))
+        self._btn_box = btn_box
         self.copy_btn = tk.Label(
             btn_box, text="⎘", bg=BG, fg=ACCENT, font=("Segoe UI", 12), cursor="hand2", padx=6
         )
@@ -306,16 +335,10 @@ class OverlayWindow:
         self.close_btn.pack(side=tk.LEFT)
         self.close_btn.bind("<Button-1>", lambda _e: self._handle_close())
 
-        # Tabs
-        tab_bar = tk.Frame(inner, bg=BG)
-        tab_bar.pack(fill=tk.X, padx=6, pady=(2, 4))
-        self._inner = inner
-        self._header = header
-        self._tab_bar = tab_bar
         self._tab_btns: Dict[str, tk.Label] = {}
         for name in TABS:
             lbl = tk.Label(
-                tab_bar,
+                strip,
                 text=name,
                 bg=PANEL,
                 fg=MUTED,
@@ -569,13 +592,17 @@ class OverlayWindow:
                 self._full_height = cur_h
         except Exception:
             pass
+        self._title_row.pack_forget()
         self.body.pack_forget()
+        self._strip.pack_configure(padx=6, pady=6)
         self._collapsed = True
         self.min_btn.configure(text="□")
+        self.win.update_idletasks()
         w = int(self.config.get("width", 560))
         x, y = self.win.winfo_x(), self.win.winfo_y()
         x, y = self._clamp_snap(x, y, w, COLLAPSED_HEIGHT)
         self.win.geometry(f"{w}x{COLLAPSED_HEIGHT}+{x}+{y}")
+        self.win.update_idletasks()
         self._note_position(x, y)
         log("overlay collapsed")
 
@@ -584,13 +611,17 @@ class OverlayWindow:
             return
         self._collapsed = False
         self.min_btn.configure(text="−")
+        self._title_row.pack(fill=tk.X, padx=8, pady=(8, 2), before=self._strip)
+        self._strip.pack_configure(padx=6, pady=(2, 4))
         self.body.pack(fill=tk.BOTH, expand=True, padx=6, pady=(0, 6))
+        self.win.update_idletasks()
         w = int(self.config.get("width", 560))
         h = int(self.config.get("height", self._full_height))
         self._full_height = h
         x, y = self.win.winfo_x(), self.win.winfo_y()
         x, y = self._clamp_snap(x, y, w, h)
         self.win.geometry(f"{w}x{h}+{x}+{y}")
+        self.win.update_idletasks()
         self._switch_tab(self._active_tab)
         self._note_position(x, y)
         log("overlay expanded")
@@ -800,23 +831,63 @@ class OverlayWindow:
 
     # ---- public API ----
 
-    def show(self) -> None:
+    def show(self, *, bring_to_front: bool = False) -> None:
         self.win.deiconify()
-        self.win.attributes("-topmost", True)
         self._visible = True
         self._reapply_win32()
+        if bring_to_front:
+            self._bring_to_front_briefly()
+        else:
+            try:
+                self.win.attributes("-topmost", False)
+            except Exception:
+                pass
         log("overlay shown")
 
+    def _bring_to_front_briefly(self) -> None:
+        """Raise above other windows once, then drop always-on-top."""
+        job = getattr(self, "_topmost_job", None)
+        if job:
+            try:
+                self.win.after_cancel(job)
+            except Exception:
+                pass
+            self._topmost_job = None
+        try:
+            self.win.attributes("-topmost", True)
+            self.win.lift()
+            try:
+                self.win.focus_force()
+            except Exception:
+                pass
+        except Exception:
+            pass
+        self._topmost_job = self.win.after(400, self._drop_topmost)
+
+    def _drop_topmost(self) -> None:
+        self._topmost_job = None
+        try:
+            self.win.attributes("-topmost", False)
+        except Exception:
+            pass
+
     def hide(self) -> None:
+        job = getattr(self, "_topmost_job", None)
+        if job:
+            try:
+                self.win.after_cancel(job)
+            except Exception:
+                pass
+            self._topmost_job = None
         self.win.withdraw()
         self._visible = False
         log("overlay hidden")
 
-    def toggle_visibility(self) -> None:
+    def toggle_visibility(self, *, bring_to_front: bool = False) -> None:
         if self._visible:
             self.hide()
         else:
-            self.show()
+            self.show(bring_to_front=bring_to_front)
 
     @property
     def visible(self) -> bool:

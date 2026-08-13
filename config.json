@@ -11,8 +11,8 @@
   "margin": 20,
   "width": 560,
   "height": 400,
-  "pos_x": 1040,
-  "pos_y": 0,
+  "pos_x": 824,
+  "pos_y": 249,
   "thresholds": {
     "cpu_temp": 85,
     "gpu_temp": 85,

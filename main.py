@@ -136,7 +136,7 @@ class App:
 
     def toggle_overlay(self) -> None:
         log("tray: show/hide")
-        self.overlay.toggle_visibility()
+        self.overlay.toggle_visibility(bring_to_front=True)
 
     def hide_overlay(self) -> None:
         log("overlay close -> hide")
