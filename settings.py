@@ -13,6 +13,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 APP_NAME = "SystemMonitorOverlay"
+WORK_FOLDER = "SystemMonitoring"
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 
 DEFAULT_CONFIG: Dict[str, Any] = {
@@ -41,28 +42,42 @@ DEFAULT_CONFIG: Dict[str, Any] = {
 }
 
 
-def app_dir() -> str:
-    """Writable directory next to exe (frozen) or project root."""
+def install_dir() -> str:
+    """Directory containing the EXE or project sources (main.py)."""
     if getattr(sys, "frozen", False):
         return os.path.dirname(sys.executable)
     return os.path.dirname(os.path.abspath(__file__))
+
+
+def app_dir() -> str:
+    """Writable workdir under LocalAppData\\SystemMonitoring."""
+    base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    return os.path.join(base, WORK_FOLDER)
 
 
 def config_path() -> str:
     return os.path.join(app_dir(), "config.json")
 
 
+def log_path() -> str:
+    return os.path.join(app_dir(), "app.log")
+
+
 def ensure_workdir() -> Dict[str, str]:
-    """Create/verify working files next to the app. Returns paths."""
-    from logutil import log
+    """Create AppData workdir and working files. Returns paths."""
+    from logutil import log, set_log_path
     from tray import ensure_icon_file
 
     root = app_dir()
+    os.makedirs(root, exist_ok=True)
+    set_log_path(log_path())
+
     paths = {
         "dir": root,
         "config": config_path(),
         "history": os.path.join(root, "stats_history.csv"),
         "icon": os.path.join(root, "icon.ico"),
+        "log": log_path(),
     }
     cfg = load_config()
     save_config(cfg)
@@ -110,7 +125,7 @@ def save_config(config: Dict[str, Any]) -> None:
 def autostart_command() -> str:
     if getattr(sys, "frozen", False):
         return f'"{sys.executable}"'
-    script = os.path.join(app_dir(), "main.py")
+    script = os.path.join(install_dir(), "main.py")
     pythonw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
     if not os.path.isfile(pythonw):
         pythonw = sys.executable

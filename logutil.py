@@ -1,49 +1,56 @@
-"""Lightweight console logging helpers."""
+"""File-based logging (no AllocConsole for frozen EXE)."""
 
 from __future__ import annotations
 
-import ctypes
+import os
 import sys
 from datetime import datetime
 from typing import Optional
 
 _enabled: bool = True
-_console_allocated: bool = False
+_log_path: Optional[str] = None
 
 
 def is_logging_enabled() -> bool:
     return _enabled
 
 
+def set_log_path(path: str) -> None:
+    """Set append log file path (e.g. %LOCALAPPDATA%\\SystemMonitoring\\app.log)."""
+    global _log_path
+    _log_path = path
+    parent = os.path.dirname(path)
+    if parent:
+        try:
+            os.makedirs(parent, exist_ok=True)
+        except Exception:
+            pass
+
+
 def ensure_console() -> None:
-    """Allocate a console for frozen EXE so print is visible."""
-    global _console_allocated
-    if _console_allocated or not getattr(sys, "frozen", False):
-        return
-    if sys.platform != "win32":
-        return
-    try:
-        kernel32 = ctypes.windll.kernel32
-        if kernel32.AllocConsole():
-            sys.stdout = open("CONOUT$", "w", encoding="utf-8", errors="replace")  # noqa: SIM115
-            sys.stderr = open("CONOUT$", "w", encoding="utf-8", errors="replace")  # noqa: SIM115
-            _console_allocated = True
-    except Exception:
-        pass
+    """No-op: frozen EXE must not allocate a console window."""
+    return
 
 
 def set_logging(enabled: bool) -> None:
     global _enabled
     _enabled = bool(enabled)
-    if _enabled:
-        ensure_console()
 
 
 def log(msg: str) -> None:
     if not _enabled:
         return
     stamp = datetime.now().strftime("%H:%M:%S")
-    try:
-        print(f"[{stamp}] {msg}", flush=True)
-    except Exception:
-        pass
+    line = f"[{stamp}] {msg}"
+    if _log_path:
+        try:
+            with open(_log_path, "a", encoding="utf-8", errors="replace") as f:
+                f.write(line + "\n")
+        except Exception:
+            pass
+    # Dev: also print; frozen EXE has no console
+    if not getattr(sys, "frozen", False):
+        try:
+            print(line, flush=True)
+        except Exception:
+            pass
