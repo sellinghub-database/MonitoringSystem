@@ -1,0 +1,7 @@
+psutil
+wmi
+GPUtil
+pystray
+Pillow
+pyinstaller
+pywin32
