@@ -28,6 +28,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "margin": 20,
     "width": 560,
     "height": 400,
+    "pos_x": None,
+    "pos_y": None,
     "thresholds": {
         "cpu_temp": 85,
         "gpu_temp": 85,

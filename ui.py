@@ -88,6 +88,33 @@ def metric_color(value: Optional[float], moderate: float = 70, critical: float =
     return OK
 
 
+def load_band_colors(pct: float, active: bool = False) -> tuple[str, str]:
+    """Soft load palette: bg, fg for tab chips."""
+    p = max(0.0, min(100.0, float(pct)))
+    if p < 25:
+        bg, fg = "#2a4a6b", "#9ec3e6"
+        if active:
+            bg, fg = "#355a7d", "#c5ddf2"
+    elif p < 50:
+        bg, fg = "#3a4a5c", "#b8c4d0"
+        if active:
+            bg, fg = "#46586c", "#d0dae4"
+    elif p < 75:
+        bg, fg = "#6b4a2a", "#e0b48a"
+        if active:
+            bg, fg = "#7d5835", "#efc9a5"
+    else:
+        bg, fg = "#6b2a2a", "#e09a9a"
+        if active:
+            bg, fg = "#7d3535", "#efb0b0"
+    return bg, fg
+
+
+COLLAPSED_HEIGHT = 60
+SNAP_PX = 12
+POS_IDLE_MS = 30000
+
+
 class OverlayWindow:
     """Tabbed slate monitoring widget."""
 
@@ -121,22 +148,37 @@ class OverlayWindow:
         self._kill_row: Optional[str] = None
         self._self_pid = os.getpid()
         self._icon_cache: Optional[IconCache] = None
+        self._collapsed = False
+        self._full_height = int(config.get("height", 400))
+        self._pos_save_job: Optional[str] = None
+        self._pending_pos: Optional[tuple[int, int]] = None
 
         width = int(config.get("width", 560))
         height = int(config.get("height", 400))
         margin = int(config.get("margin", 20))
         self._chart_window_s = int(config.get("chart_window_s", 300))
+        self._full_height = height
 
         self.win = tk.Toplevel(root)
         self.win.title("System Monitor Overlay")
-        self.win.geometry(f"{width}x{height}")
         self.win.configure(bg=BG)
         self.win.overrideredirect(True)
         self.win.attributes("-topmost", True)
         self.win.attributes("-alpha", float(config.get("opacity", 0.85)))
 
         sw = self.win.winfo_screenwidth()
-        self.win.geometry(f"{width}x{height}+{sw - width - margin}+{margin}")
+        sh = self.win.winfo_screenheight()
+        pos_x = config.get("pos_x")
+        pos_y = config.get("pos_y")
+        if pos_x is not None and pos_y is not None:
+            try:
+                x, y = int(pos_x), int(pos_y)
+            except (TypeError, ValueError):
+                x, y = sw - width - margin, margin
+        else:
+            x, y = sw - width - margin, margin
+        x, y = self._clamp_pos(x, y, width, height, sw, sh)
+        self.win.geometry(f"{width}x{height}+{x}+{y}")
         self.win.protocol("WM_DELETE_WINDOW", self._handle_close)
 
         self._font = tkfont.Font(family="Segoe UI", size=9)
@@ -173,6 +215,7 @@ class OverlayWindow:
             relief="flat",
             rowheight=28,
             font=("Consolas", 8),
+            focuscolor=PANEL,
         )
         style.configure(
             "Monitor.Treeview.Heading",
@@ -181,11 +224,16 @@ class OverlayWindow:
             relief="flat",
             borderwidth=0,
             font=("Segoe UI", 8, "bold"),
+            focuscolor=BORDER,
         )
         style.map(
             "Monitor.Treeview",
             background=[("selected", "#1f6feb")],
             foreground=[("selected", "#ffffff")],
+            focuscolor=[("!focus", PANEL), ("focus", PANEL), ("selected", "#1f6feb")],
+            bordercolor=[("focus", PANEL), ("!focus", PANEL)],
+            lightcolor=[("focus", PANEL), ("!focus", PANEL)],
+            darkcolor=[("focus", PANEL), ("!focus", PANEL)],
         )
         style.configure(
             "Monitor.Vertical.TScrollbar",
@@ -251,7 +299,7 @@ class OverlayWindow:
             btn_box, text="−", bg=BG, fg=MUTED, font=("Segoe UI", 12), cursor="hand2", padx=6
         )
         self.min_btn.pack(side=tk.LEFT)
-        self.min_btn.bind("<Button-1>", lambda _e: self.hide())
+        self.min_btn.bind("<Button-1>", lambda _e: self.toggle_collapse())
         self.close_btn = tk.Label(
             btn_box, text="×", bg=BG, fg=MUTED, font=("Segoe UI", 12), cursor="hand2", padx=6
         )
@@ -261,6 +309,9 @@ class OverlayWindow:
         # Tabs
         tab_bar = tk.Frame(inner, bg=BG)
         tab_bar.pack(fill=tk.X, padx=6, pady=(2, 4))
+        self._inner = inner
+        self._header = header
+        self._tab_bar = tab_bar
         self._tab_btns: Dict[str, tk.Label] = {}
         for name in TABS:
             lbl = tk.Label(
@@ -274,7 +325,7 @@ class OverlayWindow:
                 cursor="hand2",
             )
             lbl.pack(side=tk.LEFT, padx=2)
-            lbl.bind("<Button-1>", lambda _e, n=name: self._switch_tab(n))
+            lbl.bind("<Button-1>", lambda _e, n=name: self._on_tab_click(n))
             self._tab_btns[name] = lbl
         self._paint_tabs()
 
@@ -346,6 +397,7 @@ class OverlayWindow:
             show="tree headings",
             style="Monitor.Treeview",
             selectmode="browse",
+            takefocus=0,
         )
         tree.heading("#0", text="Name")
         tree.column("#0", width=name_width, minwidth=120, stretch=True, anchor="w")
@@ -460,32 +512,12 @@ class OverlayWindow:
         log(f"chart_window_s={seconds}")
 
     def _paint_tabs(self) -> None:
-        th = self.config.get("thresholds", {})
-        moderate = float(th.get("moderate", 70))
-        crit_map = {
-            "CPU": float(th.get("cpu_load", 90)),
-            "RAM": float(th.get("ram_usage", 90)),
-            "Disk": 90.0,
-            "Показатели": 90.0,
-        }
         for name, lbl in self._tab_btns.items():
             pct = float(self._tab_percents.get(name, 0.0))
-            base = name if name != "Показатели" else "Показатели"
-            short = {"CPU": "CPU", "RAM": "RAM", "Disk": "Disk", "Показатели": "Показатели"}[base]
-            lbl.configure(text=f"{short} {pct:.0f}%")
-            crit = crit_map.get(name, 90.0)
+            short = {"CPU": "CPU", "RAM": "RAM", "Disk": "Disk", "Показатели": "Показатели"}[name]
             active = name == self._active_tab
-            if pct >= crit:
-                lbl.configure(bg=CRIT, fg="#ffffff")
-            elif pct >= moderate:
-                if active:
-                    lbl.configure(bg=WARN, fg="#0f1419")
-                else:
-                    lbl.configure(bg="#3d2e10", fg=WARN)
-            elif active:
-                lbl.configure(bg=ACCENT, fg="#ffffff")
-            else:
-                lbl.configure(bg=PANEL, fg=MUTED)
+            bg, fg = load_band_colors(pct, active=active)
+            lbl.configure(text=f"{short} {pct:.0f}%", bg=bg, fg=fg)
 
     def _update_tab_badges(self, snap: MetricsSnapshot) -> None:
         disk_pct = 0.0
@@ -500,10 +532,17 @@ class OverlayWindow:
         }
         self._paint_tabs()
 
+    def _on_tab_click(self, name: str) -> None:
+        if self._collapsed:
+            self.expand()
+        self._switch_tab(name)
+
     def _switch_tab(self, name: str) -> None:
         self._hide_kill()
         self._active_tab = name
         self._paint_tabs()
+        if self._collapsed:
+            return
         for key, frame in self.table_frames.items():
             if key == name:
                 frame.pack(fill=tk.BOTH, expand=True)
@@ -512,6 +551,49 @@ class OverlayWindow:
         if self._latest is not None:
             self._render_active(force_rebuild=True)
         log(f"tab={name}")
+
+    def toggle_collapse(self) -> None:
+        if self._collapsed:
+            self.expand()
+        else:
+            self.collapse()
+
+    def collapse(self) -> None:
+        if self._collapsed:
+            return
+        self._hide_kill()
+        self._full_height = max(self._full_height, int(self.config.get("height", 400)))
+        try:
+            cur_h = int(self.win.winfo_height())
+            if cur_h > COLLAPSED_HEIGHT + 20:
+                self._full_height = cur_h
+        except Exception:
+            pass
+        self.body.pack_forget()
+        self._collapsed = True
+        self.min_btn.configure(text="□")
+        w = int(self.config.get("width", 560))
+        x, y = self.win.winfo_x(), self.win.winfo_y()
+        x, y = self._clamp_snap(x, y, w, COLLAPSED_HEIGHT)
+        self.win.geometry(f"{w}x{COLLAPSED_HEIGHT}+{x}+{y}")
+        self._note_position(x, y)
+        log("overlay collapsed")
+
+    def expand(self) -> None:
+        if not self._collapsed:
+            return
+        self._collapsed = False
+        self.min_btn.configure(text="−")
+        self.body.pack(fill=tk.BOTH, expand=True, padx=6, pady=(0, 6))
+        w = int(self.config.get("width", 560))
+        h = int(self.config.get("height", self._full_height))
+        self._full_height = h
+        x, y = self.win.winfo_x(), self.win.winfo_y()
+        x, y = self._clamp_snap(x, y, w, h)
+        self.win.geometry(f"{w}x{h}+{x}+{y}")
+        self._switch_tab(self._active_tab)
+        self._note_position(x, y)
+        log("overlay expanded")
 
     # ---- hover kill ----
 
@@ -612,7 +694,82 @@ class OverlayWindow:
         else:
             messagebox.showerror("Ошибка", f"Не удалось завершить процесс:\n{status}", parent=self.win)
 
-    # ---- drag ----
+    # ---- drag / position ----
+
+    def _clamp_pos(
+        self,
+        x: int,
+        y: int,
+        win_w: Optional[int] = None,
+        win_h: Optional[int] = None,
+        sw: Optional[int] = None,
+        sh: Optional[int] = None,
+    ) -> tuple[int, int]:
+        if sw is None:
+            sw = self.win.winfo_screenwidth()
+        if sh is None:
+            sh = self.win.winfo_screenheight()
+        if win_w is None:
+            win_w = max(1, int(self.win.winfo_width()))
+        if win_h is None:
+            win_h = max(1, int(self.win.winfo_height()))
+        max_x = max(0, int(sw) - int(win_w))
+        max_y = max(0, int(sh) - int(win_h))
+        return max(0, min(int(x), max_x)), max(0, min(int(y), max_y))
+
+    def _clamp_snap(
+        self,
+        x: int,
+        y: int,
+        win_w: Optional[int] = None,
+        win_h: Optional[int] = None,
+    ) -> tuple[int, int]:
+        sw = self.win.winfo_screenwidth()
+        sh = self.win.winfo_screenheight()
+        if win_w is None:
+            win_w = max(1, int(self.win.winfo_width()))
+        if win_h is None:
+            win_h = max(1, int(self.win.winfo_height()))
+        x, y = self._clamp_pos(x, y, win_w, win_h, sw, sh)
+        max_x = max(0, sw - int(win_w))
+        max_y = max(0, sh - int(win_h))
+        if x < SNAP_PX:
+            x = 0
+        elif max_x - x < SNAP_PX:
+            x = max_x
+        if y < SNAP_PX:
+            y = 0
+        elif max_y - y < SNAP_PX:
+            y = max_y
+        return x, y
+
+    def _note_position(self, x: Optional[int] = None, y: Optional[int] = None) -> None:
+        if x is None or y is None:
+            x, y = self.win.winfo_x(), self.win.winfo_y()
+        self._pending_pos = (int(x), int(y))
+        if self._pos_save_job:
+            try:
+                self.win.after_cancel(self._pos_save_job)
+            except Exception:
+                pass
+        self._pos_save_job = self.win.after(POS_IDLE_MS, self._save_pending_pos)
+
+    def _save_pending_pos(self) -> None:
+        self._pos_save_job = None
+        if not self._pending_pos:
+            return
+        x, y = self._pending_pos
+        if self.config.get("pos_x") == x and self.config.get("pos_y") == y:
+            return
+        self.config["pos_x"] = x
+        self.config["pos_y"] = y
+        try:
+            from settings import save_config
+
+            save_config(self.config)
+            log(f"position saved x={x} y={y}")
+        except Exception as exc:
+            log(f"position save failed: {exc}")
 
     def _start_drag(self, event: tk.Event) -> None:
         if self.config.get("click_through"):
@@ -628,12 +785,16 @@ class OverlayWindow:
             return
         x = event.x_root - self._drag_x
         y = event.y_root - self._drag_y
+        x, y = self._clamp_snap(x, y)
         self.win.geometry(f"+{x}+{y}")
 
     def _end_drag(self, _event: tk.Event) -> None:
         if not self._dragging:
             return
         self._dragging = False
+        x, y = self._clamp_snap(self.win.winfo_x(), self.win.winfo_y())
+        self.win.geometry(f"+{x}+{y}")
+        self._note_position(x, y)
         if self.on_drag_end:
             self.on_drag_end()
 
@@ -676,9 +837,23 @@ class OverlayWindow:
         self._restore_alpha()
 
     def apply_config(self, config: Dict[str, Any]) -> None:
+        prev_x = self.config.get("pos_x")
+        prev_y = self.config.get("pos_y")
         self.config = config
+        # Do not wipe saved/pending position unless explicitly provided
+        if config.get("pos_x") is None and prev_x is not None:
+            self.config["pos_x"] = prev_x
+        if config.get("pos_y") is None and prev_y is not None:
+            self.config["pos_y"] = prev_y
+        if "height" in config:
+            self._full_height = int(config.get("height", self._full_height))
         self.set_opacity(config.get("opacity", 0.85))
         self.set_click_through(bool(config.get("click_through")))
+        if not self._collapsed:
+            w = int(self.config.get("width", 560))
+            h = int(self.config.get("height", self._full_height))
+            x, y = self._clamp_snap(self.win.winfo_x(), self.win.winfo_y(), w, h)
+            self.win.geometry(f"{w}x{h}+{x}+{y}")
         log("overlay config applied")
 
     def update_metrics(self, data: MetricsSnapshot | Dict[str, Any]) -> None:

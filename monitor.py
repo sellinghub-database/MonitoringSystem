@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import shutil
+import subprocess
 import threading
 import time
 from collections import deque
@@ -158,7 +160,11 @@ class SystemMonitor:
         }
         self._wmi = None
         self._wmi_ohm = None
+        self._ohm_source: Optional[str] = None
+        self._lhm_hint_logged = False
+        self._nvidia_smi: Optional[str] = None
         self._init_wmi()
+        self._nvidia_smi = self._find_nvidia_smi()
 
         psutil.cpu_percent(interval=None, percpu=True)
         for p in psutil.process_iter(["cpu_percent"]):
@@ -170,19 +176,107 @@ class SystemMonitor:
                 continue
 
     def _init_wmi(self) -> None:
+        from logutil import log
+
         if wmi_mod is None:
+            log("wmi=missing ohm=None (install WMI / run as admin if needed)")
             return
         try:
             self._wmi = wmi_mod.WMI(namespace="root\\wmi")
-        except Exception:
+            wmi_ok = True
+        except Exception as exc:
             self._wmi = None
+            wmi_ok = False
+            log(f"wmi root\\wmi failed: {exc}")
+        self._ohm_source = None
         try:
             self._wmi_ohm = wmi_mod.WMI(namespace="root\\LibreHardwareMonitor")
+            self._ohm_source = "LibreHardwareMonitor"
         except Exception:
             try:
                 self._wmi_ohm = wmi_mod.WMI(namespace="root\\OpenHardwareMonitor")
+                self._ohm_source = "OpenHardwareMonitor"
             except Exception:
                 self._wmi_ohm = None
+                self._ohm_source = None
+        log(f"wmi={'ok' if wmi_ok else 'None'} ohm={self._ohm_source or 'None'}")
+        if self._ohm_source is None and not self._lhm_hint_logged:
+            self._lhm_hint_logged = True
+            log(
+                "temps: LibreHardwareMonitor/OHM WMI unavailable — "
+                "start LibreHardwareMonitor with WMI enabled for CPU/MB/RAM temps"
+            )
+
+    @staticmethod
+    def _find_nvidia_smi() -> Optional[str]:
+        found = shutil.which("nvidia-smi")
+        if found:
+            return found
+        for path in (
+            r"C:\Windows\System32\nvidia-smi.exe",
+            r"C:\Program Files\NVIDIA Corporation\NVSMI\nvidia-smi.exe",
+        ):
+            if os.path.isfile(path):
+                return path
+        return None
+
+    @staticmethod
+    def _classify_temp_sensor(name: str, parent: str, identifier: str) -> Optional[str]:
+        """Map LHM/OHM sensor to cpu|gpu|motherboard|ram using Name + Parent + Identifier."""
+        blob = f"{name} {parent} {identifier}".lower()
+        # Path-based (most reliable)
+        if any(
+            p in blob
+            for p in (
+                "/nvidiagpu",
+                "/amdgpu",
+                "/intelgpu",
+                "nvidiagpu",
+                "amdgpu",
+                "gpu-nvidia",
+                "gpu-amd",
+            )
+        ):
+            return "gpu"
+        if "gpu" in name or "gpu" in parent:
+            return "gpu"
+        if any(p in blob for p in ("/ram", "/memory", "dimm", "/ddr")):
+            if "vram" in blob or "gpu" in blob:
+                return "gpu"
+            return "ram"
+        if any(
+            t in name
+            for t in ("dimm", "memory", "ddr", "sodimm")
+        ) or ("ram" in name and "vram" not in name and "gram" not in name):
+            return "ram"
+        if any(p in blob for p in ("/amdcpu", "/intelcpu", "/cpu", "amdcpu", "intelcpu")):
+            return "cpu"
+        if any(t in name for t in ("cpu", "package", "tdie", "tctl", "ccd", "core #", "core temperature")):
+            return "cpu"
+        if "core" in name and "gpu" not in blob:
+            return "cpu"
+        # Motherboard / chipset / VRM — avoid bare "system" (matches too much)
+        if any(
+            t in name
+            for t in (
+                "motherboard",
+                "mainboard",
+                "pch",
+                "chipset",
+                "vrm",
+                "mos",
+                "systin",
+                "auxtin",
+                "cputin",
+            )
+        ) or any(p in blob for p in ("/lpc/", "/motherboard", "mainboard", "nct", "it87", "superio")):
+            # cputin is often MB sensor near CPU socket — keep as motherboard
+            if "cputin" in name:
+                return "motherboard"
+            if "cpu" in name and "cputin" not in name:
+                return "cpu"
+            return "motherboard"
+        return None
 
     @property
     def latest(self) -> Optional[MetricsSnapshot]:
@@ -478,27 +572,17 @@ class SystemMonitor:
                     if stype != "temperature":
                         continue
                     name = (getattr(sensor, "Name", "") or "").lower()
+                    parent = (getattr(sensor, "Parent", "") or "").lower()
+                    identifier = (getattr(sensor, "Identifier", "") or "").lower()
                     try:
                         val = float(sensor.Value)
                     except Exception:
                         continue
                     if not (0 < val < 150):
                         continue
-                    if "gpu" in name:
-                        buckets["gpu"].append(val)
-                    elif "dimm" in name or "memory" in name or "ram" in name or "ddr" in name:
-                        buckets["ram"].append(val)
-                    elif (
-                        "motherboard" in name
-                        or "mainboard" in name
-                        or "system" in name
-                        or "pch" in name
-                        or "chipset" in name
-                        or "vrm" in name
-                    ):
-                        buckets["motherboard"].append(val)
-                    elif "cpu" in name or "package" in name or "tdie" in name or "tctl" in name or "core" in name:
-                        buckets["cpu"].append(val)
+                    key = self._classify_temp_sensor(name, parent, identifier)
+                    if key:
+                        buckets[key].append(val)
             except Exception:
                 pass
 
@@ -507,25 +591,17 @@ class SystemMonitor:
                 result[key] = max(vals)
 
         if result["cpu"] is None:
-            result["cpu"] = self._read_cpu_temp()
+            result["cpu"] = self._read_cpu_temp_fallback()
+
+        if result["gpu"] is None:
+            nv = self._read_nvidia_smi()
+            if nv.get("temp") is not None:
+                result["gpu"] = nv["temp"]
+
         return result
 
-    def _read_cpu_temp(self) -> Optional[float]:
-        if self._wmi_ohm is not None:
-            try:
-                temps = []
-                for sensor in self._wmi_ohm.Sensor():
-                    name = (getattr(sensor, "Name", "") or "").lower()
-                    stype = (getattr(sensor, "SensorType", "") or "").lower()
-                    if stype == "temperature" and ("cpu" in name or "package" in name or "tdie" in name):
-                        val = float(sensor.Value)
-                        if 0 < val < 150:
-                            temps.append(val)
-                if temps:
-                    return max(temps)
-            except Exception:
-                pass
-
+    def _read_cpu_temp_fallback(self) -> Optional[float]:
+        """ACPI / psutil only — LHM path already handled in _read_all_temps."""
         if self._wmi is not None:
             try:
                 for zone in self._wmi.MSAcpi_ThermalZoneTemperature():
@@ -550,6 +626,50 @@ class SystemMonitor:
             pass
         return None
 
+    def _read_nvidia_smi(self) -> Dict[str, Optional[float]]:
+        result: Dict[str, Optional[float]] = {
+            "load": None,
+            "vram_used": None,
+            "vram_total": None,
+            "temp": None,
+        }
+        smi = self._nvidia_smi
+        if not smi:
+            return result
+        try:
+            proc = subprocess.run(
+                [
+                    smi,
+                    "--query-gpu=temperature.gpu,utilization.gpu,memory.used,memory.total",
+                    "--format=csv,noheader,nounits",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=1.5,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                check=False,
+            )
+            if proc.returncode != 0 or not (proc.stdout or "").strip():
+                return result
+            line = proc.stdout.strip().splitlines()[0]
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) < 4:
+                return result
+
+            def _f(i: int) -> Optional[float]:
+                try:
+                    return float(parts[i])
+                except (IndexError, ValueError):
+                    return None
+
+            result["temp"] = _f(0)
+            result["load"] = _f(1)
+            result["vram_used"] = _f(2)
+            result["vram_total"] = _f(3)
+        except Exception:
+            pass
+        return result
+
     def _read_gpu(self) -> Dict[str, Optional[float]]:
         result: Dict[str, Optional[float]] = {
             "load": None,
@@ -568,35 +688,48 @@ class SystemMonitor:
                     result["vram_total"] = float(g.memoryTotal)
                     if g.temperature is not None:
                         result["temp"] = float(g.temperature)
-                    return result
             except Exception:
                 pass
 
-        if self._wmi_ohm is not None:
+        if result["temp"] is None or result["load"] is None:
+            nv = self._read_nvidia_smi()
+            for key in result:
+                if result[key] is None and nv.get(key) is not None:
+                    result[key] = nv[key]
+
+        if self._wmi_ohm is not None and (
+            result["temp"] is None or result["load"] is None or result["vram_used"] is None
+        ):
             try:
                 loads, temps, mem_used, mem_total = [], [], [], []
                 for sensor in self._wmi_ohm.Sensor():
                     name = (getattr(sensor, "Name", "") or "").lower()
+                    parent = (getattr(sensor, "Parent", "") or "").lower()
+                    identifier = (getattr(sensor, "Identifier", "") or "").lower()
                     stype = (getattr(sensor, "SensorType", "") or "").lower()
-                    val = float(sensor.Value)
-                    if "gpu" not in name:
+                    blob = f"{name} {parent} {identifier}"
+                    if "gpu" not in blob and "nvidia" not in blob and "amd" not in parent:
                         continue
-                    if stype == "load" and ("core" in name or "gpu" in name):
+                    try:
+                        val = float(sensor.Value)
+                    except Exception:
+                        continue
+                    if stype == "load" and ("core" in name or "gpu" in name or "d3d" in name):
                         loads.append(val)
                     elif stype == "temperature":
                         temps.append(val)
-                    elif stype == "smalldata":
+                    elif stype in ("smalldata", "data"):
                         if "used" in name:
                             mem_used.append(val)
                         if "total" in name:
                             mem_total.append(val)
-                if loads:
+                if result["load"] is None and loads:
                     result["load"] = max(loads)
-                if temps:
+                if result["temp"] is None and temps:
                     result["temp"] = max(temps)
-                if mem_used:
+                if result["vram_used"] is None and mem_used:
                     result["vram_used"] = max(mem_used)
-                if mem_total:
+                if result["vram_total"] is None and mem_total:
                     result["vram_total"] = max(mem_total)
             except Exception:
                 pass
